@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
     Оптимизатор EPUB файлов.
-    Многопоточная версия.
+    Многопоточная версия. Добавлена поддержка 7-Zip для ускорения.
 
 .PARAMETER InputPath
     Путь к папке с исходными EPUB файлами.
@@ -20,28 +20,45 @@ param(
     [switch]$AsciiTempMode
 )
 
-if (-not (Test-Path $InputPath)) { Write-Error "Входной путь не найден: $InputPath"; exit 1 }
-if (-not (Test-Path $OutputPath)) { New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null }
+if (-not (Test-Path $InputPath))
+{ Write-Error "Входной путь не найден: $InputPath"; exit 1
+}
+if (-not (Test-Path $OutputPath))
+{ New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null
+}
 
 $ScriptDir = $PSScriptRoot
 $PngOptScript = Join-Path $ScriptDir "png_opt.ps1"
 $JpgOptScript = Join-Path $ScriptDir "jpg_opt_losless.ps1"
 $GifOptScript = Join-Path $ScriptDir "gif_opt_losless.ps1"
 
-foreach ($s in @($PngOptScript, $JpgOptScript, $GifOptScript)) {
-    if (-not (Test-Path $s)) { Write-Error "Не найден скрипт: $s"; exit 1 }
+foreach ($s in @($PngOptScript, $JpgOptScript, $GifOptScript))
+{
+    if (-not (Test-Path $s))
+    { Write-Error "Не найден скрипт: $s"; exit 1
+    }
 }
 
+# Проверка наличия 7-Zip
+$Has7z = [bool](Get-Command 7z -ErrorAction SilentlyContinue)
+
 # Логика потоков
-if ($j -eq 0) {
+if ($j -eq 0)
+{
     $Threads = (Get-CimInstance Win32_Processor).NumberOfCores
-} else {
+} else
+{
     $Threads = $j
 }
 # Если потоков много, скрипты сжатия запускаем в 1 поток
-$SubScriptJ = if ($Threads -gt 1) { 1 } else { 0 }
+$SubScriptJ = if ($Threads -gt 1)
+{ 1
+} else
+{ 0
+}
 
 Write-Host "Поиск EPUB..." -ForegroundColor Cyan
+Write-Host "Использование 7-Zip: $Has7z" -ForegroundColor Cyan
 $EpubFiles = Get-ChildItem -LiteralPath $InputPath -Filter "*.epub" -Recurse -File
 Write-Host "Найдено: $($EpubFiles.Count). Потоков: $Threads" -ForegroundColor Cyan
 
@@ -49,7 +66,7 @@ $EpubFiles = $EpubFiles | Sort-Object -Property Length -Descending
 
 $EpubFiles | ForEach-Object -Parallel {
     $EpubFile = $_
-    
+
     # Проброс переменных
     $InputPath    = $using:InputPath
     $OutputPath   = $using:OutputPath
@@ -58,16 +75,21 @@ $EpubFiles | ForEach-Object -Parallel {
     $GifOptScript = $using:GifOptScript
     $SubScriptJ   = $using:SubScriptJ
     $GlobalAscii  = $using:AsciiTempMode
+    $Use7z        = $using:Has7z
 
     # -- БУФЕР ЛОГОВ --
     $LogBuffer = [System.Text.StringBuilder]::new()
-    function Log-Message { param($Msg) [void]$LogBuffer.AppendLine($Msg) }
+    function Log-Message
+    { param($Msg) [void]$LogBuffer.AppendLine($Msg)
+    }
 
     # Пути
     $RelPath = $EpubFile.DirectoryName.Substring($InputPath.Length).TrimStart('\', '/')
     $TargetDir = Join-Path $OutputPath $RelPath
-    if (-not (Test-Path $TargetDir)) { New-Item -ItemType Directory -Path $TargetDir -Force | Out-Null }
-    
+    if (-not (Test-Path $TargetDir))
+    { New-Item -ItemType Directory -Path $TargetDir -Force | Out-Null
+    }
+
     $FinalEpubPath = Join-Path $TargetDir $EpubFile.Name
 
     # Временная папка
@@ -75,34 +97,48 @@ $EpubFiles | ForEach-Object -Parallel {
     $TempDir = Join-Path $env:TEMP $TempDirName
     New-Item -ItemType Directory -Path $TempDir -Force | Out-Null
 
-    try {
+    try
+    {
         Log-Message "Processing: $($EpubFile.Name)"
-        Expand-Archive -LiteralPath $EpubFile.FullName -DestinationPath $TempDir -Force
+
+        # --- Распаковка ---
+        if ($Use7z)
+        {
+            & 7z x "-o$TempDir" $EpubFile.FullName -y *>$null
+        } else
+        {
+            Expand-Archive -LiteralPath $EpubFile.FullName -DestinationPath $TempDir -Force
+        }
 
         # --- Оптимизация ---
-        
+
         # Проверка пути на ASCII
         $IsPathAscii = ($TempDir -match "^[\x00-\x7F]*$")
         $UseAsciiMode = $GlobalAscii -or (-not $IsPathAscii)
 
         # Функция для запуска и захвата
-        function Run-Opt {
+        function Run-Opt
+        {
             param($Script, $ArgsDict)
-            # *>&1 перехватывает Write-Host, Write-Error и т.д.
             $res = & $Script @ArgsDict *>&1 | Out-String
-            if (-not [string]::IsNullOrWhiteSpace($res)) { Log-Message $res.Trim() }
+            if (-not [string]::IsNullOrWhiteSpace($res))
+            { Log-Message $res.Trim()
+            }
         }
 
         # Запускаем только если файлы существуют
-        if ([bool](Get-ChildItem -Path $TempDir -Include "*.png" -File -Recurse -ErrorAction SilentlyContinue)) {
+        if ([bool](Get-ChildItem -Path $TempDir -Include "*.png" -File -Recurse -ErrorAction SilentlyContinue))
+        {
             Run-Opt -Script $PngOptScript -ArgsDict @{InputPath=$TempDir; OutputPath=$TempDir; j=$SubScriptJ; AsciiTempMode=$UseAsciiMode}
         }
 
-        if ([bool](Get-ChildItem -Path $TempDir -Include "*.jpg", "*.jpeg" -File -Recurse -ErrorAction SilentlyContinue)) {
+        if ([bool](Get-ChildItem -Path $TempDir -Include "*.jpg", "*.jpeg" -File -Recurse -ErrorAction SilentlyContinue))
+        {
             Run-Opt -Script $JpgOptScript -ArgsDict @{InputPath=$TempDir; OutputPath=$TempDir; j=$SubScriptJ; AsciiTempMode=$UseAsciiMode}
         }
 
-        if ([bool](Get-ChildItem -Path $TempDir -Include "*.gif" -File -Recurse -ErrorAction SilentlyContinue)) {
+        if ([bool](Get-ChildItem -Path $TempDir -Include "*.gif" -File -Recurse -ErrorAction SilentlyContinue))
+        {
             Run-Opt -Script $GifOptScript -ArgsDict @{InputPath=$TempDir; OutputPath=$TempDir; j=$SubScriptJ; AsciiTempMode=$UseAsciiMode}
         }
 
@@ -111,16 +147,31 @@ $EpubFiles | ForEach-Object -Parallel {
 
         $CurrentDir = Get-Location
         Set-Location $TempDir
-        try {
-            if (Test-Path "mimetype") {
-                Compress-Archive -Path ".\mimetype" -DestinationPath $TempEpubBuild -CompressionLevel NoCompression -Force
+        try
+        {
+            if ($Use7z)
+            {
+                # 1. Сначала добавляем mimetype без сжатия
+                if (Test-Path "mimetype")
+                {
+                    & 7z a -tzip -mx0 $TempEpubBuild "mimetype" *>$null
+                }
+                # 2. Добавляем все остальные файлы с максимальным сжатием
+                & 7z a -tzip -mx9 $TempEpubBuild "*" "-x!mimetype" *>$null
+            } else
+            {
+                if (Test-Path "mimetype")
+                {
+                    Compress-Archive -Path ".\mimetype" -DestinationPath $TempEpubBuild -CompressionLevel NoCompression -Force
+                }
+                $Content = Get-ChildItem -LiteralPath $TempDir | Where-Object { $_.Name -ne 'mimetype' }
+                if ($Content)
+                {
+                    Compress-Archive -Path $Content -DestinationPath $TempEpubBuild -Update -CompressionLevel Optimal
+                }
             }
-            $Content = Get-ChildItem -LiteralPath $TempDir | Where-Object { $_.Name -ne 'mimetype' }
-            if ($Content) {
-                Compress-Archive -Path $Content -DestinationPath $TempEpubBuild -Update -CompressionLevel Optimal
-            }
-        }
-        finally {
+        } finally
+        {
             Set-Location $CurrentDir
         }
 
@@ -128,21 +179,25 @@ $EpubFiles | ForEach-Object -Parallel {
         $OrigSize = $EpubFile.Length
         $NewSize = (Get-Item $TempEpubBuild).Length
 
-        if ($NewSize -lt $OrigSize) {
+        if ($NewSize -lt $OrigSize)
+        {
             Move-Item -LiteralPath $TempEpubBuild -Destination $FinalEpubPath -Force
             Log-Message "  Success: $($EpubFile.Name) ($([math]::Round(($OrigSize-$NewSize)/1KB)) KB saved)"
-        } else {
+        } else
+        {
             Copy-Item -LiteralPath $EpubFile.FullName -Destination $FinalEpubPath -Force
             Remove-Item -LiteralPath $TempEpubBuild -Force
             Log-Message "  No gain: $($EpubFile.Name) (kept original)"
         }
 
-    }
-    catch {
+    } catch
+    {
         Log-Message "Error $($EpubFile.Name): $_"
-    }
-    finally {
-        if (Test-Path $TempDir) { Remove-Item $TempDir -Recurse -Force -ErrorAction SilentlyContinue }
+    } finally
+    {
+        if (Test-Path $TempDir)
+        { Remove-Item $TempDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 
     # АТОМАРНЫЙ ВЫВОД
